@@ -129,8 +129,7 @@ Puppet::Functions.create_function(:hiera_vault) do
     token
   end
 
-  def lookup_key(key, options, context)
-
+  def validate_options(options, context)
     if confine_keys = options['confine_to_keys']
       raise ArgumentError, '[hiera-vault] confine_to_keys must be an array' unless confine_keys.is_a?(Array)
 
@@ -164,6 +163,11 @@ Puppet::Functions.create_function(:hiera_vault) do
     if vault_token(options).nil?
       raise ArgumentError, '[hiera-vault] no token set in options and no token in VAULT_TOKEN'
     end
+  end
+
+  def lookup_key(key, options, context)
+
+    validate_options(options, context)
 
     result = vault_get(key, options, context)
 
@@ -177,6 +181,34 @@ Puppet::Functions.create_function(:hiera_vault) do
     end
   end
 
+  def setup_vault_conection(options, context)
+    # If our Vault client has got cleaned up by a previous shutdown call, reinstate it
+    if $hiera_vault_client.nil?
+      $hiera_vault_client = Vault::Client.new
+    end
+
+    begin
+      $hiera_vault_client.configure do |config|
+        config.address = options['address'] unless options['address'].nil?
+        config.token = vault_token(options)
+        config.ssl_pem_file = options['ssl_pem_file'] unless options['ssl_pem_file'].nil?
+        config.ssl_verify = options['ssl_verify'] unless options['ssl_verify'].nil?
+        config.ssl_ca_cert = options['ssl_ca_cert'] if config.respond_to? :ssl_ca_cert
+        config.ssl_ca_path = options['ssl_ca_path'] if config.respond_to? :ssl_ca_path
+        config.ssl_ciphers = options['ssl_ciphers'] if config.respond_to? :ssl_ciphers
+      end
+
+      if $hiera_vault_client.sys.seal_status.sealed?
+        raise Puppet::DataBinding::LookupError, "[hiera-vault] vault is sealed"
+      end
+
+      context.explain { "[hiera-vault] Client configured to connect to #{$hiera_vault_client.address}" }
+    rescue StandardError => e
+      $hiera_vault_shutdown.call
+      $hiera_vault_client = nil
+      raise Puppet::DataBinding::LookupError, "[hiera-vault] Skipping backend. Configuration error: #{e}"
+    end
+  end
 
   def vault_get(key, options, context)
 
@@ -196,33 +228,7 @@ Puppet::Functions.create_function(:hiera_vault) do
       cached_value = $cache.get(key, options)
       return cached_value.value if ! cached_value.nil?
 
-      # If our Vault client has got cleaned up by a previous shutdown call, reinstate it
-      if $hiera_vault_client.nil?
-        $hiera_vault_client = Vault::Client.new
-      end
-
-
-      begin
-        $hiera_vault_client.configure do |config|
-          config.address = options['address'] unless options['address'].nil?
-          config.token = vault_token(options)
-          config.ssl_pem_file = options['ssl_pem_file'] unless options['ssl_pem_file'].nil?
-          config.ssl_verify = options['ssl_verify'] unless options['ssl_verify'].nil?
-          config.ssl_ca_cert = options['ssl_ca_cert'] if config.respond_to? :ssl_ca_cert
-          config.ssl_ca_path = options['ssl_ca_path'] if config.respond_to? :ssl_ca_path
-          config.ssl_ciphers = options['ssl_ciphers'] if config.respond_to? :ssl_ciphers
-        end
-
-        if $hiera_vault_client.sys.seal_status.sealed?
-          raise Puppet::DataBinding::LookupError, "[hiera-vault] vault is sealed"
-        end
-
-        context.explain { "[hiera-vault] Client configured to connect to #{$hiera_vault_client.address}" }
-      rescue StandardError => e
-        $hiera_vault_shutdown.call
-        $hiera_vault_client = nil
-        raise Puppet::DataBinding::LookupError, "[hiera-vault] Skipping backend. Configuration error: #{e}"
-      end
+      setup_vault_conection(options, context)      
 
       answer = nil
       strict_mode = (options.key?('strict_mode') and options['strict_mode'])
